@@ -1,2 +1,2 @@
 # mysample-repo
-Git practice
+Git練習用を更新
