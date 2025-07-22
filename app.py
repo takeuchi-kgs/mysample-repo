@@ -14,6 +14,7 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 import io
 import tempfile
 import zipfile
+import os
 
 
 class PDFStamper:
@@ -150,6 +151,14 @@ def main():
     with col2:
         st.header("🔄 処理実行")
         
+        # 元ファイルの扱いを選択
+        keep_original = st.radio(
+            "元ファイルの扱い",
+            options=[True, False],
+            format_func=lambda x: "元ファイルを残す（_完了付きで新規保存）" if x else "元ファイルを置き換え（上書き保存）",
+            help="元のファイルを保持するか、処理済みファイルで置き換えるかを選択してください"
+        )
+        
         process_button = st.button(
             "📝 スタンプを追加",
             disabled=not uploaded_files,
@@ -158,10 +167,10 @@ def main():
         )
         
         if process_button and uploaded_files:
-            process_files(st.session_state.stamper, uploaded_files)
+            process_files(st.session_state.stamper, uploaded_files, keep_original)
 
 
-def process_files(stamper: PDFStamper, uploaded_files):
+def process_files(stamper: PDFStamper, uploaded_files, keep_original: bool):
     """ファイル処理のメイン関数"""
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -178,18 +187,28 @@ def process_files(stamper: PDFStamper, uploaded_files):
             # スタンプを追加
             stamped_bytes = stamper.stamp_pdf(file_bytes)
             
-            # ファイル名に"_完了"を追加
-            name_parts = uploaded_file.name.rsplit('.', 1)
-            if len(name_parts) == 2:
-                new_name = f"{name_parts[0]}_完了.{name_parts[1]}"
+            # ファイル名を決定
+            if keep_original:
+                # 元ファイルを残す場合：_完了を追加
+                name_parts = uploaded_file.name.rsplit('.', 1)
+                if len(name_parts) == 2:
+                    new_name = f"{name_parts[0]}_完了.{name_parts[1]}"
+                else:
+                    new_name = f"{uploaded_file.name}_完了"
             else:
-                new_name = f"{uploaded_file.name}_完了"
+                # 元ファイルを置き換える場合：元のファイル名
+                new_name = uploaded_file.name
+            
+            # 処理済みファイルをダウンロードフォルダに自動保存
+            save_path = save_processed_file(new_name, stamped_bytes)
             
             processed_files.append({
                 'name': new_name,
+                'original_name': uploaded_file.name,
                 'data': stamped_bytes,
                 'original_size': len(file_bytes),
-                'processed_size': len(stamped_bytes)
+                'processed_size': len(stamped_bytes),
+                'save_path': save_path
             })
             
         except Exception as e:
@@ -204,12 +223,39 @@ def process_files(stamper: PDFStamper, uploaded_files):
     
     if processed_files:
         st.success(f"✅ {len(processed_files)} 個のファイルの処理が完了しました")
+        action_text = "新規保存" if keep_original else "上書き保存"
+        st.info(f"📁 処理済みファイルは自動的にダウンロードフォルダに{action_text}されました")
         
         # 結果表示
         show_results(processed_files)
+
+
+def save_processed_file(filename: str, file_data: bytes) -> str:
+    """処理済みファイルをダウンロードフォルダに保存"""
+    try:
+        downloads_folder = Path.home() / "Downloads"
+        save_file = downloads_folder / filename
         
-        # ダウンロードセクション
-        create_download_section(processed_files)
+        # ファイル名が重複する場合は番号を付加
+        counter = 1
+        while save_file.exists():
+            name_parts = filename.rsplit('.', 1)
+            if len(name_parts) == 2:
+                new_name = f"{name_parts[0]}_{counter}.{name_parts[1]}"
+            else:
+                new_name = f"{filename}_{counter}"
+            save_file = downloads_folder / new_name
+            counter += 1
+        
+        # ファイルを保存
+        with open(save_file, 'wb') as f:
+            f.write(file_data)
+        
+        return str(save_file)
+        
+    except Exception as e:
+        st.error(f"保存エラー: {e}")
+        return ""
 
 
 def show_results(processed_files):
@@ -221,47 +267,14 @@ def show_results(processed_files):
             col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
                 st.write(f"**{i}. {file_info['name']}**")
+                if file_info.get('save_path'):
+                    st.write(f"💾 保存先: {file_info['save_path']}")
             with col2:
                 st.write(f"元サイズ: {file_info['original_size']/1024:.1f} KB")
             with col3:
                 st.write(f"処理後: {file_info['processed_size']/1024:.1f} KB")
 
 
-def create_download_section(processed_files):
-    """ダウンロードセクションを作成"""
-    st.header("💾 ダウンロード")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("📄 個別ダウンロード")
-        for file_info in processed_files:
-            st.download_button(
-                label=f"📥 {file_info['name']}",
-                data=file_info['data'],
-                file_name=file_info['name'],
-                mime="application/pdf",
-                use_container_width=True
-            )
-    
-    with col2:
-        st.subheader("📦 一括ダウンロード")
-        if len(processed_files) > 1:
-            # ZIPファイル作成
-            zip_buffer = create_zip_file(processed_files)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            zip_filename = f"processed_pdfs_{timestamp}.zip"
-            
-            st.download_button(
-                label="📦 全ファイルをZIPでダウンロード",
-                data=zip_buffer,
-                file_name=zip_filename,
-                mime="application/zip",
-                use_container_width=True
-            )
-        else:
-            st.info("複数ファイルの場合のみ一括ダウンロードが利用できます")
 
 
 def create_zip_file(processed_files) -> bytes:
